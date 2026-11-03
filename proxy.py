@@ -152,9 +152,7 @@ class Tap(BaseHTTPRequestHandler):
 
         # 1. Print what the agent sent.
         print(f"\n{'=' * 78}\n[{stamp()}] >>> {self.command} {self.path}", flush=True)
-        for name, value in self.headers.items():
-            if name.lower() in ("authorization", "x-api-key"):
-                value = value[:16] + "..."
+        for name, value in redacted(self.headers.items()):  # same redaction as the log
             print(f"    {name}: {value}")
         if body:
             try:
