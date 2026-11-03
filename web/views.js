@@ -4,13 +4,17 @@ import { el, fmtMs, fmtUsd, fmtInt, oneLine, plural, wordCount, copyButton, fmtC
 import { costOf, stripHarness } from './model.js';
 import {
   section, badge, disclosure, longText, richText, jsonTree, textOrJson, wordDiff,
-  blockView, callPair, resultView, ICON, plainText,
+  blockView, callPair, resultView, ICON, plainText, HARNESS_ROLE_LABEL,
 } from './widgets.js';
 
 // ------------------------------------------------------------ thread labels
 
+// Side call: count_tokens, a one-request tool-less thread, or a small-model
+// (haiku) thread that has no tools or a single request.
 export function isSideThread(t) {
-  return !!t.sideKind || (t.requests.length === 1 && t.maxTools === 0) || /haiku/i.test(t.model || '');
+  if (t.sideKind) return true;
+  if (t.requests.length === 1 && t.maxTools === 0) return true;
+  return /haiku/i.test(t.model || '') && (t.maxTools === 0 || t.requests.length === 1);
 }
 
 function shortModel(m) {
@@ -20,10 +24,12 @@ function shortModel(m) {
 // Guessed labels (SPEC D5), overridden by the user's renames.
 export function threadLabels(store, renames) {
   const out = new Map();
+  // main: the largest tool set, whatever the model; earliest start wins ties
+  // (threads are in start order).
   let main = null;
   for (const t of store.threads) {
-    if (t.parentCall || isSideThread(t)) continue;
-    if (!main || t.maxTools > main.maxTools) main = t; // threads are in start order: earliest wins ties
+    if (t.parentCall || t.sideKind || t.maxTools === 0) continue;
+    if (!main || t.maxTools > main.maxTools) main = t;
   }
   for (const t of store.threads) {
     let kind, label;
@@ -80,8 +86,9 @@ export function renderTree(app) {
 
     const group = el('div', { class: 't-group' }, head);
     if (t.parentCall) {
-      group.appendChild(el('div', { class: 't-note' }, '↳ launched by ', app.link(t.parentCall.ex, `${t.parentCall.call.name} in #${t.parentCall.ex.seq}`)));
+      group.appendChild(parentNote(app, t, '↳ launched by '));
     }
+    if (t.possibleSubagentOf) group.appendChild(possibleSubagentNote(app, t));
     if (t.possibleContinuationOf) {
       const o = t.possibleContinuationOf;
       group.appendChild(el('div', { class: 't-note' }, '⋯ possible continuation of ',
@@ -105,6 +112,26 @@ export function renderTree(app) {
     root.appendChild(el('div', { class: 'empty', text: store.list.length ? 'No requests match.' : 'Waiting for traffic…  Run the agent through the proxy.' }));
   }
   return root;
+}
+
+// "launched by Agent in #6", plus "(linked by timing)" when the prompt text did not match.
+function parentNote(app, t, prefix) {
+  const pc = t.parentCall;
+  return el('div', { class: 't-note' }, prefix, app.link(pc.ex, `${pc.call.name} in #${pc.ex.seq}`),
+    t.linkedBy === 'timing'
+      ? el('span', { class: 'badge warn', title: 'The prompt text did not match; this was the only pending subagent call when the thread started.', text: 'linked by timing' })
+      : null);
+}
+
+// Several subagent calls were pending and none matched by prompt text: not linked.
+function possibleSubagentNote(app, t) {
+  const parts = [];
+  t.possibleSubagentOf.forEach((o, i) => {
+    if (i) parts.push(', ');
+    parts.push(app.link(o.requests[o.requests.length - 1], app.labels.get(o)?.label || `thread ${o.num}`));
+  });
+  return el('div', { class: 't-note', title: 'Started while several subagent calls were pending; none matched by prompt text, so it is not linked.' },
+    '? possible subagent of ', parts);
 }
 
 function requestRow(app, ex) {
@@ -212,7 +239,7 @@ export function renderDetail(app, ex) {
           () => el('div', { class: 'blk kind-tooldef' },
             t.description ? longText(t.description) : el('div', { class: 'dim', text: '(no description)' }),
             el('div', { class: 'sub-label' }, 'input schema ', copyButton(() => JSON.stringify(t.schema, null, 2))),
-            t.schema ? jsonTree(t.schema, { openDepth: 2 }) : jsonTree(t.raw, { openDepth: 1 }))));
+            t.schema ? jsonTree(t.schema) : jsonTree(t.raw))));
       }
       return box;
     },
@@ -248,15 +275,16 @@ export function renderDetail(app, ex) {
   };
   const newMsgs = p.messages.slice(ex.newStart);
   const nTR = newMsgs.reduce((n, m) => n + m.blocks.filter((b) => b.kind === 'tool_result').length, 0);
-  const nText = newMsgs.reduce((n, m) => n + m.blocks.filter((b) => b.kind === 'text').length, 0);
+  const nText = newMsgs.reduce((n, m) => n + (m.role === 'system' ? 0 : m.blocks.filter((b) => b.kind === 'text').length), 0);
+  const nHarness = newMsgs.filter((m) => m.role === 'system').length;
   root.appendChild(section({
     key: 'new', title: ' New', kind: 'user', state: S, open: true,
-    summary: [nTR ? plural(nTR, 'tool result') : '', nText ? plural(nText, 'text block') : ''].filter(Boolean).join(' + ') +
+    summary: [nTR ? plural(nTR, 'tool result') : '', nText ? plural(nText, 'text block') : '', nHarness ? plural(nHarness, 'harness message') : ''].filter(Boolean).join(' + ') +
       ` · message${newMsgs.length === 1 ? '' : 's'} ${ex.newStart}–${p.messages.length - 1}`,
     render: () => {
       const box = el('div');
       newMsgs.forEach((m, k) => {
-        box.appendChild(el('div', { class: 'msg-role', text: `${m.role} · message ${ex.newStart + k}` }));
+        box.appendChild(el('div', { class: 'msg-role', text: `${roleLabel(m.role)} · message ${ex.newStart + k}` }));
         for (const b of m.blocks) box.appendChild(blockView(b, m.role, newCtx));
       });
       if (!newMsgs.length) box.appendChild(el('div', { class: 'dim', text: '(empty)' }));
@@ -328,7 +356,8 @@ function detailHeader(app, ex) {
   const lines = [el('div', { class: 'd-line1' }, parts), el('div', { class: 'd-meta', text: meta.join('  ·  ') })];
   if (ex.end?.error) lines.push(el('div', { class: 'warn', text: 'upstream error: ' + ex.end.error }));
   const t = ex.thread;
-  if (t?.parentCall && t.requests[0] === ex) lines.push(el('div', { class: 't-note' }, '↳ subagent launched by ', app.link(t.parentCall.ex, `${t.parentCall.call.name} in #${t.parentCall.ex.seq}`)));
+  if (t?.parentCall && t.requests[0] === ex) lines.push(parentNote(app, t, '↳ subagent launched by '));
+  if (t?.possibleSubagentOf && t.requests[0] === ex) lines.push(possibleSubagentNote(app, t));
   if (t?.possibleContinuationOf && t.requests[0] === ex) {
     const o = t.possibleContinuationOf;
     lines.push(el('div', { class: 't-note' }, '⋯ possible continuation of ', app.link(o.requests[o.requests.length - 1], app.labels.get(o).label), ' (history did not match; not merged)'));
@@ -419,7 +448,8 @@ function subagentLink(app, thread, callId) {
   return el('div', { class: 'subagent-box' },
     el('div', {}, el('span', { class: 'badge sub', text: 'subagent' }), ' ',
       app.link(last, `${app.labels.get(sub).label} (${plural(sub.requests.length, 'request')})`),
-      app.store.isLive(sub) ? el('span', { class: 'live', text: ' ● running' }) : null),
+      app.store.isLive(sub) ? el('span', { class: 'live', text: ' ● running' }) : null,
+      sub.linkedBy === 'timing' ? el('span', { class: 'badge warn', title: 'Linked because it was the only pending subagent call; the prompt text did not match.', text: 'linked by timing' }) : null),
     text ? el('div', { class: 'sub-label', text: finished ? 'subagent final reply:' : 'subagent latest text:' }) : null,
     text ? longText(text, { render: (t) => richText(t, { markdown: true }) }) : null);
 }
@@ -434,18 +464,23 @@ function localPairs(messages) {
   return { calls, results };
 }
 
+// Role as shown to the reader: system-role messages are harness-injected.
+function roleLabel(role) {
+  return role === 'system' ? HARNESS_ROLE_LABEL : role;
+}
+
 // A history message collapsed to one line.
 function messageLine(m, i, ctx, local) {
   const summary = m.blocks.map((b) => {
     if (b.kind === 'tool_call') return `→ ${b.name}`;
     if (b.kind === 'tool_result') return `← ${local.calls.get(b.call_id)?.call.name || 'result'}${b.is_error ? ' ✗' : ''}`;
     if (b.kind === 'thinking') return '∴';
-    if (b.kind === 'text') return '"' + oneLine(stripHarness(b.text) || '[harness text]', 60) + '"';
+    if (b.kind === 'text') return '"' + oneLine((m.role === 'system' ? b.text : stripHarness(b.text)) || '[harness text]', 60) + '"';
     return b.kind;
   }).join(' ');
-  const icon = m.role === 'assistant' ? ICON.assistant : ICON.user;
+  const icon = m.role === 'assistant' ? ICON.assistant : m.role === 'system' ? ICON.harness : ICON.user;
   return disclosure(
-    el('span', { class: `msg-line role-${m.role}` }, el('span', { class: 'r-num', text: String(i) }), el('span', { class: 'ico', text: icon }), el('b', { text: m.role }), ' ', el('span', { class: 'dim', text: oneLine(summary, 140) })),
+    el('span', { class: `msg-line role-${m.role}` }, el('span', { class: 'r-num', text: String(i) }), el('span', { class: 'ico', text: icon }), el('b', { text: roleLabel(m.role) }), ' ', el('span', { class: 'dim', text: oneLine(summary, 140) })),
     () => {
       const box = el('div');
       for (const b of m.blocks) {
@@ -475,18 +510,18 @@ function rawSection(app, ex, open) {
       const req = ex.req;
       const bodyStr = 'body' in req ? JSON.stringify(req.body, null, 2) : req.body_text ?? req.body_b64 ?? '';
       box.appendChild(el('div', { class: 'sub-label' }, 'request body ', copyButton(bodyStr)));
-      if ('body' in req) box.appendChild(jsonTree(req.body, { openDepth: 1 }));
+      if ('body' in req) box.appendChild(jsonTree(req.body));
       else if (req.body_text != null) box.appendChild(textOrJson(req.body_text));
       else if (req.body_b64 != null) box.appendChild(el('div', { class: 'dim', text: `binary body, ${req.body_b64.length} base64 characters` }));
       else box.appendChild(el('div', { class: 'dim', text: '(no body)' }));
       if (ex.parsed) {
         box.appendChild(el('div', { class: 'sub-label' }, 'other request fields (not system/tools/messages) ', copyButton(JSON.stringify(ex.parsed.params, null, 2))));
-        box.appendChild(jsonTree(ex.parsed.params, { openDepth: 1 }));
+        box.appendChild(jsonTree(ex.parsed.params));
       }
-      box.appendChild(el('div', { class: 'sub-label' }, 'request headers (credentials redacted by the proxy)'));
+      box.appendChild(el('div', { class: 'sub-label' }, 'request headers (credentials redacted by the proxy) ', copyButton(() => headerText(req.headers))));
       box.appendChild(headerTable(req.headers));
       if (ex.end) {
-        box.appendChild(el('div', { class: 'sub-label', text: `response ${ex.end.status ?? ''} headers` }));
+        box.appendChild(el('div', { class: 'sub-label' }, `response ${ex.end.status ?? ''} headers `, copyButton(() => headerText(ex.end.headers))));
         box.appendChild(headerTable(ex.end.headers));
       }
       const stream = ex.chunks.map((c) => c.data).join('');
@@ -497,8 +532,16 @@ function rawSection(app, ex, open) {
   });
 }
 
+function headerRows(h) {
+  return Array.isArray(h) ? h : Object.entries(h || {});
+}
+
+function headerText(h) {
+  return headerRows(h).map(([k, v]) => `${k}: ${v}`).join('\n');
+}
+
 function headerTable(h) {
-  const rows = Array.isArray(h) ? h : Object.entries(h || {});
+  const rows = headerRows(h);
   const tbl = el('table', { class: 'hdrs' });
   for (const [k, v] of rows) tbl.appendChild(el('tr', {}, el('td', { text: k }), el('td', { text: String(v) })));
   if (!rows.length) tbl.appendChild(el('tr', {}, el('td', { class: 'dim', text: '(none)' })));

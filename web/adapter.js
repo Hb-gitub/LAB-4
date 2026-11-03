@@ -8,6 +8,8 @@
 //                   tool_result{call_id, content: blocks, is_error} · image{media_type,size} · other{type}
 //                   every block also keeps `raw`, the original JSON.
 // Neutral reply:    { blocks, stop_reason, error, model, done }
+// Reply state (newReply) must expose `closed`: the number of blocks that have
+// finished streaming, so tool calls can be registered before the reply ends.
 // Neutral usage:    { input, output, cache_read, cache_write }
 
 // ---------------------------------------------------------------- Anthropic
@@ -93,6 +95,7 @@ export const anthropic = {
       mode: null, // 'sse' | 'json'
       buf: '', text: '', blocks: [], partial: [], stop_reason: null, error: null,
       model: null, id: null, usage: null, events: 0, counted: null,
+      closed: 0, // number of content blocks that have finished streaming
     };
   },
 
@@ -158,6 +161,7 @@ export const anthropic = {
           try { b.input = s ? JSON.parse(s) : (b.input ?? {}); } catch { b.input = s; }
           st.partial[ev.index] = null;
         }
+        st.closed++;
         break;
       }
       case 'message_delta':

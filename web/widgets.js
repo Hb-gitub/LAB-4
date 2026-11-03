@@ -176,7 +176,10 @@ function looksJson(s) {
   try { JSON.parse(t); return true; } catch { return false; }
 }
 
-export function jsonTree(value, { openDepth = 2 } = {}) {
+// SPEC D6: the top two levels start open; anything deeper starts collapsed.
+export const JSON_OPEN_DEPTH = 2;
+
+export function jsonTree(value, { openDepth = JSON_OPEN_DEPTH } = {}) {
   return el('div', { class: 'jt' }, jnode(value, null, 0, openDepth));
 }
 
@@ -221,7 +224,7 @@ function jprim(v) {
     };
     const asJson = () => {
       wrap.textContent = '';
-      wrap.append(jsonTree(JSON.parse(v.trim()), { openDepth: 1 }), el('button', { class: 'linkish', type: 'button', text: 'view as text', onclick: asText }));
+      wrap.append(jsonTree(JSON.parse(v.trim())), el('button', { class: 'linkish', type: 'button', text: 'view as text', onclick: asText }));
     };
     asText();
     return wrap;
@@ -234,7 +237,7 @@ function jprim(v) {
 export function textOrJson(text, opts = {}) {
   if (looksJson(text)) {
     const box = el('div');
-    const asTree = () => { box.textContent = ''; box.append(el('button', { class: 'linkish', type: 'button', text: 'view as text', onclick: asText }), jsonTree(JSON.parse(text.trim()), { openDepth: 1 })); };
+    const asTree = () => { box.textContent = ''; box.append(el('button', { class: 'linkish', type: 'button', text: 'view as text', onclick: asText }), jsonTree(JSON.parse(text.trim()))); };
     const asText = () => { box.textContent = ''; box.append(el('button', { class: 'linkish', type: 'button', text: 'view as JSON', onclick: asTree }), longText(text, opts)); };
     asText();
     return box;
@@ -290,10 +293,15 @@ export function wordDiff(a, b) {
 // Renders one neutral content block. `ctx` supplies pairing lookups:
 //   ctx.resultFor(callId) -> {block, ex}|null, ctx.callFor(callId) -> {call, ex}|null,
 //   ctx.link(ex) -> element linking to a request, ctx.pairCalls (bool)
+export const HARNESS_ROLE_LABEL = 'harness / system-role';
+
 export function blockView(b, role, ctx = {}) {
+  // System-role messages inside messages[] are injected by the agent harness,
+  // never typed by the user: their own block kind, styled like harness tags.
+  if (role === 'system' && b.kind !== 'tool_call' && b.kind !== 'tool_result') return harnessRoleBlock(b);
   switch (b.kind) {
     case 'text': {
-      const kind = role === 'assistant' ? 'assistant' : role === 'system' ? 'system' : 'user';
+      const kind = role === 'assistant' ? 'assistant' : 'user';
       return el('div', { class: `blk kind-${kind}` },
         el('div', { class: 'blk-label' }, el('span', { class: 'ico', text: ICON[kind] }), role === 'assistant' ? 'assistant text' : `${role} text`, copyButton(b.text)),
         longText(b.text, { render: (t) => richText(t, { markdown: role === 'assistant' }) }));
@@ -312,8 +320,16 @@ export function blockView(b, role, ctx = {}) {
     default:
       return el('div', { class: 'blk kind-other' },
         el('div', { class: 'blk-label' }, el('span', { class: 'ico', text: ICON.other }), `${b.type} block`),
-        jsonTree(b.raw, { openDepth: 1 }));
+        jsonTree(b.raw));
   }
+}
+
+function harnessRoleBlock(b) {
+  const label = el('div', { class: 'blk-label' }, el('span', { class: 'ico', text: ICON.harness }), HARNESS_ROLE_LABEL,
+    b.kind !== 'text' ? el('span', { class: 'dim', text: ` · ${b.type || b.kind} block` }) : null,
+    b.kind === 'text' ? copyButton(b.text) : null);
+  const body = b.kind === 'text' ? longText(b.text, { render: (t) => richText(t) }) : jsonTree(b.raw);
+  return el('div', { class: 'blk kind-harness', title: 'System-role message injected by the agent harness, not typed by the user' }, label, body);
 }
 
 export function callView(b) {
@@ -322,7 +338,7 @@ export function callView(b) {
       copyButton(() => (b.partial != null ? b.partial : JSON.stringify(b.input, null, 2)))),
     b.partial != null
       ? el('div', { class: 'pre streaming-json', text: b.partial }, el('span', { class: 'cursor' }))
-      : (b.input && typeof b.input === 'object' ? jsonTree(b.input, { openDepth: 2 }) : plainText(stringify(b.input))));
+      : (b.input && typeof b.input === 'object' ? jsonTree(b.input) : plainText(stringify(b.input))));
 }
 
 export function resultView(b, ctx = {}, { label = true } = {}) {

@@ -38,6 +38,15 @@ export function messageHash(role, blocks) {
   return hash(role + '\u0001' + blocks.map(blockFp).filter(Boolean).join('\u0001'));
 }
 
+// "New" on a thread's first request (SPEC D5): from the final user-role
+// message to the end. Agents also put system-role messages in messages[]
+// (environment, MCP instructions, tool additions); they may follow the user's
+// turn and must not push the typed text into History.
+export function firstRequestNewStart(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === 'user') return i;
+  return Math.max(0, messages.length - 1);
+}
+
 // ------------------------------------------------------------------ prices
 
 export function priceFor(prices, model) {
@@ -125,7 +134,7 @@ export class Store {
 
     if (p.kind === 'count_tokens') {
       this.newThread(ex, { side: 'count_tokens' });
-      ex.newStart = Math.max(0, p.messages.length - 1);
+      ex.newStart = firstRequestNewStart(p.messages);
       return;
     }
     this.assignThread(ex);
@@ -146,7 +155,7 @@ export class Store {
       ex.newStart = bestLen < n ? bestLen : Math.max(0, n - 1);
       this.addToThread(best, ex);
     } else {
-      ex.newStart = Math.max(0, n - 1);
+      ex.newStart = firstRequestNewStart(ex.parsed.messages);
       const t = this.newThread(ex, {});
       this.linkNewThread(t, ex);
     }
@@ -173,7 +182,7 @@ export class Store {
   newThread(ex, { side }) {
     const t = {
       id: ex.id, num: ++this.threadSeq, requests: [], sideKind: side || null,
-      startT: ex.t0, lastT: ex.t0, parentCall: null, possibleContinuationOf: null,
+      startT: ex.t0, lastT: ex.t0, parentCall: null, linkedBy: null, possibleSubagentOf: null, possibleContinuationOf: null,
       calls: new Map(), // call id -> {call, ex}
       results: new Map(), // call id -> {block, ex}
       subagents: new Map(), // call id -> child thread
@@ -194,6 +203,9 @@ export class Store {
 
   // A new thread: is it a subagent of a pending Agent/Task call, or a
   // possible continuation (after compaction) of an existing thread?
+  // Linking: the call's prompt text found in the thread's first user message
+  // wins. Otherwise, if exactly one call is pending, link to it "by timing".
+  // With several pending and no text match, don't link; note the candidates.
   linkNewThread(t, ex) {
     const p = ex.parsed;
     if (p.tools.length > 0 && this.pendingSubagent.length) {
@@ -203,13 +215,16 @@ export class Store {
         const prompt = typeof call.input?.prompt === 'string' ? call.input.prompt.trim() : '';
         return prompt && text.includes(prompt.slice(0, 200));
       });
-      if (pick < 0 && !this.pendingSubagent.some(({ call }) => typeof call.input?.prompt === 'string')) pick = 0;
+      let by = 'text';
+      if (pick < 0 && this.pendingSubagent.length === 1) { pick = 0; by = 'timing'; }
       if (pick >= 0) {
         const link = this.pendingSubagent.splice(pick, 1)[0];
         t.parentCall = link;
+        t.linkedBy = by;
         link.thread.subagents.set(link.call.id, t);
         return;
       }
+      t.possibleSubagentOf = [...new Set(this.pendingSubagent.map((s) => s.thread))];
     }
     if (p.tools.length > 0) {
       for (let i = this.threads.length - 2; i >= 0; i--) {
@@ -246,9 +261,31 @@ export class Store {
       try { ex.adapter.feed(ex.rs, ev.data); } catch (e) { console.warn(e); }
       ex.replyCache = null;
       ex.search = null;
+      // A block finished streaming: register its tool calls now, not at the end
+      // of the reply. The agent may launch a subagent before the reply ends.
+      if (ex.rs.closed > (ex.closedSeen || 0)) {
+        ex.closedSeen = ex.rs.closed;
+        this.registerCalls(ex);
+      }
     }
     this.version++;
     this.changed.add(ex.id);
+  }
+
+  // Record finished tool calls of a reply in its thread; Agent/Task calls
+  // without a result yet become pending subagent launches. Idempotent.
+  registerCalls(ex) {
+    if (!ex.thread || ex.parsed.kind !== 'messages') return;
+    ex.registered ||= new Set();
+    for (const b of this.reply(ex).blocks) {
+      if (b.kind !== 'tool_call' || b.partial != null || !b.id || ex.registered.has(b.id)) continue;
+      ex.registered.add(b.id);
+      ex.thread.calls.set(b.id, { call: b, ex });
+      if (SUBAGENT_TOOLS.has(b.name) && !ex.thread.results.has(b.id)) {
+        this.pendingSubagent.push({ thread: ex.thread, ex, call: b });
+        this.structural = true;
+      }
+    }
   }
 
   onEnd(ev) {
@@ -264,13 +301,11 @@ export class Store {
       const r = this.reply(ex);
       if (r.blocks.length && !r.error && ex.parsed.kind === 'messages') {
         ex.replyHash = messageHash('assistant', r.blocks);
-        for (const b of r.blocks) {
-          if (b.kind !== 'tool_call') continue;
-          ex.thread.calls.set(b.id, { call: b, ex });
-          if (SUBAGENT_TOOLS.has(b.name) && !ex.thread.results.has(b.id)) {
-            this.pendingSubagent.push({ thread: ex.thread, ex, call: b });
-          }
-        }
+        this.registerCalls(ex); // non-streamed replies, and anything not yet registered
+      }
+      // A failed reply is retried by the agent; its calls will never get a result.
+      if (r.error || ev.error || (ev.status != null && ev.status >= 400)) {
+        this.pendingSubagent = this.pendingSubagent.filter((s) => s.ex !== ex);
       }
     }
     this.version++;
@@ -335,7 +370,9 @@ export class Store {
     if (!ex.adapter) return `${ex.req.method} ${ex.req.path}`;
     const p = ex.parsed;
     if (p.kind === 'count_tokens') return 'count tokens';
-    const results = [], texts = [];
+    // Text is grouped by its actual role. Typed user text wins; harness text
+    // (system-role messages) is shown only when nobody typed anything.
+    const results = [], texts = { user: [], assistant: [], harness: [] };
     for (let i = ex.newStart; i < p.messages.length; i++) {
       const m = p.messages[i];
       for (const b of m.blocks) {
@@ -343,15 +380,19 @@ export class Store {
           const c = this.callFor(ex, b.call_id);
           results.push((c?.call.name || 'tool') + (b.is_error ? ' ✗' : ''));
         } else if (b.kind === 'text') {
+          if (m.role === 'system') { const t = b.text.trim(); if (t) texts.harness.push(t); continue; }
           const t = stripHarness(b.text).trim();
-          if (t) texts.push((m.role === 'user' ? '' : m.role + ': ') + t);
+          if (t) (texts[m.role] || texts.user).push(t);
         }
       }
     }
+    const quote = (list) => `"${list.join(' ').replace(/\s+/g, ' ').slice(0, 80)}"`;
     const parts = [];
     if (results.length === 1) parts.push(`← ${results[0]} result`);
     else if (results.length > 1) parts.push(`← ${results.length} results: ${[...new Set(results)].join(', ')}`);
-    if (texts.length) parts.push(`user: "${texts.join(' ').replace(/\s+/g, ' ').slice(0, 80)}"`);
+    if (texts.user.length) parts.push(`user: ${quote(texts.user)}`);
+    if (texts.assistant.length) parts.push(`assistant: ${quote(texts.assistant)}`);
+    if (!texts.user.length && !texts.assistant.length && texts.harness.length) parts.push(`harness: ${quote(texts.harness)}`);
     if (!parts.length) return p.messages.length ? '(harness text only)' : '(no messages)';
     return parts.join(' + ');
   }

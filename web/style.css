@@ -127,6 +127,9 @@ main { flex: 1; display: flex; min-height: 0; }
 .kind-call { border-color: var(--k-call); } .kind-call .ico { color: var(--k-call); }
 .kind-result { border-color: var(--k-result); } .kind-result .ico { color: var(--k-result); }
 .kind-error { border-color: var(--k-error); background: color-mix(in srgb, var(--k-error) 8%, var(--bg2)); } .kind-error .ico { color: var(--k-error); }
+/* system-role messages inside messages[]: harness-injected, styled like harness tags (SPEC D6) */
+.kind-harness { border: 1px dashed var(--k-harness); border-left: 3px solid var(--k-harness); background: color-mix(in srgb, var(--k-harness) 12%, var(--bg2)); }
+.kind-harness > .blk-label { color: var(--k-harness); font-weight: 700; } .kind-harness .ico { color: var(--k-harness); }
 .blk.compact { font-size: 12px; color: var(--dim); }
 .msg-role { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); margin-top: 8px; }
 
@@ -162,7 +165,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .disc.open > .disc-body { display: block; }
 .tool-row b { margin-right: 6px; }
 .msg-line { display: inline-flex; gap: 6px; align-items: baseline; min-width: 0; }
-.role-assistant .ico { color: var(--k-assistant); } .role-user .ico { color: var(--k-user); }
+.role-assistant .ico { color: var(--k-assistant); } .role-user .ico { color: var(--k-user); } .role-system .ico, .role-system b { color: var(--k-harness); }
 
 /* JSON tree */
 .jt { font-family: var(--mono); font-size: 12px; }
