@@ -1,6 +1,6 @@
 # SPEC: Live Agent-Traffic Dashboard
 
-Status: **ready for review**. All design decisions (D1–D8) are settled. No code yet.
+Status: D1–D8 are implemented. **D9 (Export Logs) is a new requirement, specified but not yet implemented.**
 
 ## 1. Purpose
 
@@ -35,6 +35,7 @@ calls connect to the results that come back in later requests.
 | R4 | Show model replies: text and requested tool calls. |
 | R5 | Readable UX: collapsible long text, formatted JSON, clear visual distinction between parts. |
 | R6 | Statistics (tokens, time, cost, tool breakdown) as a complement to the message drill-down, not a replacement. |
+| R7 | Export: download the selected exchange as a formatted JSON file, and download the active run's whole `.jsonl` log (D9). |
 
 ## 4. Decisions
 
@@ -149,7 +150,7 @@ later request of the same thread. Until that request arrives, the call is shown 
 ### D6. Layout: two panes, list on the left and detail on the right
 
 ```
-┌ [run ▾]  [search]           ┬ request #14 · main · Fable 5.1 · 2.1s · $0.04 · 200 ┐
+┌ [run ▾]  [search]  [⤓ run]  ┬ request #14 · main · Fable 5.1 · 2.1s · $0.04 · 200  [⤓] ┐
 │ ▼ main            ● live    │ ▸ System       3 blocks · 4,342 words · unchanged  │
 │   #14 ← Bash result         │ ▸ Tools        24 · Bash Read Edit … · unchanged   │
 │   #13 ← Read result         │ ▸ History      26 messages                         │
@@ -229,6 +230,57 @@ requests · input / output tokens · cache-hit % · wall time · API-equivalent 
 - *Cache-hit %* = `cache_read / (input + cache_read + cache_write)`.
 - Charts are inline SVG built by the page (D4: no libraries), with the same block-kind colours as D6.
 
+### D9. Export Logs: one exchange as JSON, or the whole run as `.jsonl`
+
+**Why.** The dashboard is read-only and lives on `127.0.0.1`, so there is no way to take a capture
+anywhere else. To attach a request to a bug report, share it with a teammate, diff it outside the
+tool or keep it after the logs are cleaned up (D3), you currently have to find the right file in
+`logs/` and grep out the right lines by exchange `id`. Two buttons cover both cases.
+
+**1. Export exchange (detail view header).**
+- An export button (`⤓`, tooltip "Export this exchange as JSON") sits at the right end of the
+  request detail header (D6). It is enabled whenever a request is selected, including one that is still
+  streaming. In that case it exports what has arrived so far and the file says so (`"complete": false`).
+- It downloads a single pretty-printed JSON file (2-space indent, UTF-8), built in the browser
+  from data the page already holds. No server round-trip, no new endpoint.
+- File name: `<run>_req-<N>.json`, e.g. `2026-11-03_10-14-03_req-14.json`.
+- Contents:
+
+  ```json
+  {
+    "format": "agent-traffic-exchange/1",
+    "exported_at": "<ISO-8601 time>",
+    "run": "<log name>",
+    "number": 14,
+    "exchange_id": "<id>",
+    "thread": "<thread label>",
+    "complete": true,
+    "raw": { "request": { … }, "chunks": [ … ], "end": { … } },
+    "parsed": { "model": …, "system": […], "tools": […], "messages": […],
+                "reply": { … }, "usage": { … }, "cost_estimate": … }
+  }
+  ```
+
+  `raw` holds the exchange's log events exactly as logged (D1), so the export can be re-parsed later.
+  `parsed` is the neutral model from the adapter (D2), and is `null` for exchanges no adapter
+  recognises. `cost_estimate` keeps the D7 label and is `null` when the price is unknown.
+
+**2. Export run (top bar / summary strip).**
+- A download button (`⤓ run`, tooltip "Download this run's log (.jsonl)") sits in the top bar next to
+  the run picker, and always refers to the run currently open in the picker.
+- It downloads the log file **byte for byte as stored**. Nothing is re-encoded or filtered, and the
+  current search or Stats filter is ignored. The file name is the log's own name, e.g. `2026-11-03_10-14-03.jsonl`.
+- Served by a new stdlib endpoint on `dashboard.py`: `GET /download?log=<name>`, with
+  `Content-Type: application/x-ndjson` and `Content-Disposition: attachment; filename="<name>"`.
+  `<name>` is checked against the same pattern as `/events` and must resolve inside the log
+  directory. Anything else gets a 404.
+- For a run that is still being written, the download is a snapshot. It is cut at the last complete
+  line, so the file always parses as JSON lines.
+
+**Safety.** Exports contain whatever the log contains: full prompts, file contents and tool output, which
+can include secrets that aren't in headers. Credentials are already redacted at write time (D1), and
+export adds nothing back. Both buttons are plain downloads to the local machine, and nothing is uploaded.
+
 ## 5. Out of scope (v1)
 
 - Changing, replaying or blocking traffic. The dashboard only watches.
@@ -240,7 +292,7 @@ requests · input / output tokens · cache-hit % · wall time · API-equivalent 
 
 ```
 proxy.py        # as supplied, plus JSON-lines logging (D1, D3)
-dashboard.py    # stdlib server: static files, log list, SSE stream (D4)
+dashboard.py    # stdlib server: static files, log list, SSE stream (D4), log download (D9)
 prices.json     # editable price table (D7)
 web/            # index.html, style.css, *.js (adapter, threading, views)
 logs/           # one .jsonl per proxy run (D3)
@@ -260,7 +312,12 @@ logs/           # one .jsonl per proxy run (D3)
 6. No credential, not even a prefix, appears in the log or the UI.
 7. Token totals in the strip equal the sum of the per-request usage. Cost totals are marked as
    estimates and list any excluded requests.
+8. Exporting a finished request gives a JSON file whose `raw` events equal that exchange's lines
+   in the log, and whose `parsed` section matches what the detail view shows.
+9. Downloading a finished run gives a file identical to the log on disk (same checksum). Downloading a
+   live run gives a valid `.jsonl` with no partial last line. `/download` with a name outside the
+   log directory returns 404.
 
 ## 8. Open decisions
 
-_None. All decisions are recorded in §4._
+_None. All decisions, including D9, are recorded in §4._
