@@ -57,11 +57,16 @@ agent ──► proxy.py ──► API
   messages, rebuild streams and pair tool calls with results. This keeps the proxy change
   small and lets the dashboard's parsing be fixed and re-run on old logs.
 - Events per exchange, all sharing one exchange `id`:
-  - `request`: time, method, path, headers, body. `authorization`, `x-api-key` and `cookie` are replaced with
-    `"<redacted>"` before writing, so the log never holds credentials, not even a prefix.
+  - `request`: time, method, path, headers, body. `authorization`, `x-api-key`, `cookie`, `set-cookie`
+    and `proxy-authorization` are replaced with `"<redacted>"` before writing, so the log never holds
+    credentials, not even a prefix. The proxy's terminal output redacts the same headers.
   - `chunk`: time, raw bytes of each streamed piece as it is relayed, so the dashboard can show a
-    reply while it is still being written.
-  - `end`: time, status, response headers, and an error if the upstream failed.
+    reply while it is still being written. The bytes are decoded incrementally as UTF-8, so a
+    character split across chunks stays intact. Bytes that aren't valid UTF-8 are stored as base64
+    with an encoding marker.
+  - `end`: time, status, response headers, and an error if the upstream failed. If the upstream
+    fails at any point after connecting, an `end` event with `error` is still written.
+- Time, method, path, status and headers are plain JSON.
 - The dashboard server runs as its own process and can be started, stopped or restarted
   without affecting the agent. On connect, a browser receives the existing log first and
   then live events.
@@ -79,7 +84,7 @@ agent ──► proxy.py ──► API
   | `system[]`: text blocks | `body.system` (string or block list) |
   | `tools[]`: name, description, input schema | `body.tools` |
   | `messages[]`: role, content blocks | `body.messages` |
-  | content block kinds: `text`, `thinking`, `tool_call{id,name,input}`, `tool_result{call_id,content,is_error}`, `image`, `other` | `text`, `thinking`, `tool_use`, `tool_result`, `image`, anything else |
+  | content block kinds: `text`, `thinking`, `tool_call{id,name,input}`, `tool_result{call_id,content,is_error}`, `image`, `harness`, `other` | `text`, `thinking`, `tool_use`, `tool_result`, `image`, blocks of system-role messages, anything else |
   | `reply`: content blocks, `stop_reason` | rebuilt from SSE `message_start` / `content_block_*` / `message_delta` |
   | `usage`: input, output, cache-read, cache-write tokens | `message_start.usage` + `message_delta.usage` |
 
@@ -87,6 +92,11 @@ agent ──► proxy.py ──► API
   `function_call_output`) only takes a second adapter. No UI changes.
 - Traffic that no adapter recognises (other paths, HEAD/GET probes, non-JSON bodies) is still
   listed and shown as raw, formatted JSON or text. Nothing is dropped silently.
+- A reply that isn't `text/event-stream` is parsed as one JSON message. A non-2xx reply is a JSON
+  error and shows as an error in the tree.
+- `/v1/messages/count_tokens` is a side call and is never priced.
+- Real Claude Code puts system-role messages inside `messages[]` (environment, MCP instructions,
+  tool additions). They are their own block kind, `harness`, and are never shown as user text.
 
 ### D3. Persistence: one log per proxy run, past runs browsable
 
@@ -119,21 +129,30 @@ agent ──► proxy.py ──► API
 A new request `R` **continues** thread `T` if `R.messages` begins with `expected(last request of T)`.
 The comparison is on normalised content: `cache_control` markers are ignored, and so are keys in
 a fixed ignore-list, which is extended when real traffic shows a field that changes harmlessly.
+A string `content` equals a list holding one text block with the same text. `signature`,
+`citations`, thinking blocks and empty text blocks are also ignored.
 If several threads match, the longest match wins, then the most recently active thread.
-If none match, `R` starts a new thread.
+If none match, `R` starts a new thread. An identical retry after a failed request continues the
+same thread.
 
 **"New message" (R2).** For a continuing request, the new part is the messages after the matched
 prefix, usually one user message holding tool results and/or typed text. For a thread's first
-request, it is the final user message. Everything before that counts as *history*.
+request, it starts at the final user-role message. Everything before that counts as *history*.
 
 **Thread labels** are guessed automatically and can be renamed in the UI:
-- **main**: the thread with the largest tool set that started first in the run.
+- **main**: the thread with the largest tool set, whatever its model.
 - **subagent · <type>**: a thread that starts while another thread has an unanswered
   subagent-launching tool call (e.g. `Agent`/`Task`). The label is taken from that call's input, and the
   thread is linked to it. In R3 the parent's tool call opens the subagent thread, and
   the subagent's final reply is shown as the result.
-- **side call · <model>**: a one-request thread with no tools, or on a small model (title
-  generation, summaries, token counting).
+- **side call · <model>**: a thread with no tools, or a single request on a small model (model id
+  contains `haiku`): title generation, summaries, token counting.
+
+**Subagent linking.** An `Agent`/`Task` call counts as pending once its `tool_use` block has
+finished streaming. A new thread is linked to the call whose prompt text appears in its first user
+message. Otherwise, if exactly one call is pending, it is linked to that call and marked *"linked by
+timing"*. If several are pending, it is not linked and is marked *"possible subagent of <thread>"*.
+Calls in a failed reply are dropped.
 
 **Breaks in the chain.** If history is rewritten (e.g. context compaction), the next request
 won't match, so it starts a new thread. When its system prompt and tools match an existing
@@ -163,6 +182,8 @@ later request of the same thread. Until that request arrives, the call is shown 
 **Left pane: thread tree.**
 - Threads are ordered as in D5. Each request row shows its number, a one-line summary of its new
   part (e.g. `← Bash result`, `user: "fix the…"`), status (streaming / done / error) and duration.
+  The summary uses the message's actual role (`harness: …` for system-role blocks).
+- Thread renames are kept in the browser, per log.
 - An **other / raw** group at the bottom holds exchanges that no adapter recognised.
 - **Follow live** is on by default: the newest request is selected automatically as it arrives.
   Selecting anything by hand pauses following, and a "↑ N new · resume live" pill brings it back.
@@ -227,6 +248,8 @@ requests · input / output tokens · cache-hit % · wall time · API-equivalent 
 - *Tool round-trip* = start of the request carrying the result − end of the reply that made the
   call. This includes tool run time, permission prompts and agent overhead, and is labelled that way.
 - *Cache-hit %* = `cache_read / (input + cache_read + cache_write)`.
+- *Wall time* in the strip = earliest request start to latest reply end. In the per-thread table,
+  time = sum of latencies, labelled that way.
 - Charts are inline SVG built by the page (D4: no libraries), with the same block-kind colours as D6.
 
 ## 5. Out of scope (v1)
@@ -260,6 +283,11 @@ logs/           # one .jsonl per proxy run (D3)
 6. No credential, not even a prefix, appears in the log or the UI.
 7. Token totals in the strip equal the sum of the per-request usage. Cost totals are marked as
    estimates and list any excluded requests.
+8. A multi-byte character split across chunks displays correctly.
+9. A subagent whose first request arrives before the parent's reply ends is still linked to the
+   parent's call.
+10. On a real Claude Code first request, "New" shows the typed prompt, not a harness block.
+11. A non-2xx reply shows as an error in the tree.
 
 ## 8. Open decisions
 
