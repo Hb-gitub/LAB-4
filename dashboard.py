@@ -94,7 +94,12 @@ def list_logs() -> list[dict]:
 
 
 def log_path(name: str) -> Path | None:
-    """A log file by name, or None unless the name is valid and resolves inside LOG_DIR."""
+    """A log file by name, or None unless the name is valid and resolves inside LOG_DIR.
+
+    The `.jsonl` extension may be left off: `2026-11-03_10-14-03` finds `2026-11-03_10-14-03.jsonl`.
+    """
+    if name and not name.endswith(".jsonl"):
+        name += ".jsonl"
     if not NAME_RE.match(name):
         return None
     root = LOG_DIR.resolve()
