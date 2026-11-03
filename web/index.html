@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'">
+  <meta name="color-scheme" content="light dark">
+  <title>Agent traffic</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <span class="brand">◆ Agent traffic</span>
+    <label class="run-label">run <select id="run" title="Proxy runs, newest first"></select></label>
+    <input id="search" type="search" placeholder="Search new part, reply, tool calls  ( / )" autocomplete="off" spellcheck="false">
+    <span id="conn" class="conn"></span>
+  </header>
+  <div id="strip" class="strip"></div>
+  <div id="banner" class="banner" hidden></div>
+  <main>
+    <aside id="left">
+      <div id="filterbar" class="filterbar" hidden></div>
+      <button id="pill" class="pill" type="button" hidden></button>
+      <div id="tree" class="tree-box"></div>
+    </aside>
+    <section id="right">
+      <nav class="tabs">
+        <button type="button" data-tab="detail" class="active">Detail</button>
+        <button type="button" data-tab="stats">Stats</button>
+      </nav>
+      <div id="pane" class="pane"></div>
+    </section>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
