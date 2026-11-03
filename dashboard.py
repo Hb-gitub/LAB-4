@@ -12,6 +12,8 @@ Endpoints
     GET /                     the page (web/index.html and friends)
     GET /api/logs             runs, newest first: name, start, size, exchanges
     GET /api/prices           prices.json
+    GET /download?log=<name>  the log file as stored (export run, SPEC D9); a live log
+                              is cut at its last complete line
     GET /events?log=<name>    SSE: the whole log, then live lines as they are appended.
                               Each line is sent with `id: <byte offset>`, so an
                               EventSource that reconnects resumes where it left off.
@@ -91,6 +93,17 @@ def list_logs() -> list[dict]:
     return runs
 
 
+def log_path(name: str) -> Path | None:
+    """A log file by name, or None unless the name is valid and resolves inside LOG_DIR."""
+    if not NAME_RE.match(name):
+        return None
+    root = LOG_DIR.resolve()
+    path = (root / name).resolve()  # follows symlinks: a link pointing outside is refused
+    if path.parent != root or not path.is_file():
+        return None
+    return path
+
+
 def log_names() -> list[str]:
     return sorted((p.name for p in LOG_DIR.glob("*.jsonl") if NAME_RE.match(p.name)), reverse=True) \
         if LOG_DIR.is_dir() else []
@@ -137,6 +150,9 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/events":
             name = parse_qs(url.query).get("log", [""])[0]
             self.stream(name)
+        elif url.path == "/download":
+            name = parse_qs(url.query).get("log", [""])[0]
+            self.download(name)
         else:
             self.static(url.path)
 
@@ -148,6 +164,29 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_bytes(200, target.read_bytes(), MIME.get(target.suffix, "application/octet-stream"))
 
+    # --- Export run (SPEC D9) ------------------------------------------------
+
+    def download(self, name: str) -> None:
+        """The log byte for byte, cut at the last complete line if it is still being written."""
+        path = log_path(name)
+        if path is None:
+            self.send_bytes(404, b"no such log", "text/plain")
+            return
+        try:
+            data = path.read_bytes()
+        except OSError:
+            self.send_bytes(404, b"no such log", "text/plain")
+            return
+        data = data[: data.rfind(b"\n") + 1]  # drop a partial last line (live run); no-op for a finished one
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(data)
+
     # --- Server-Sent Events -------------------------------------------------
 
     def sse(self, data: bytes) -> None:
@@ -155,10 +194,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def stream(self, name: str) -> None:
-        if not NAME_RE.match(name) or not (LOG_DIR / name).is_file():
+        path = log_path(name)
+        if path is None:
             self.send_bytes(404, b"no such log", "text/plain")
             return
-        path = LOG_DIR / name
         try:
             offset = int(self.headers.get("Last-Event-ID") or 0)
         except ValueError:

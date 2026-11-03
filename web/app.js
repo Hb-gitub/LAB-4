@@ -231,6 +231,12 @@ const app = {
     $('tree').replaceChildren(el('div', { class: 'empty', text: 'Loading log…' }));
     history.replaceState(null, '', '?log=' + encodeURIComponent(name));
     this.renderRunPicker();
+    // Export run (D9): always the run open in the picker, served as stored by /download.
+    const dl = $('dl-run');
+    dl.href = '/download?log=' + encodeURIComponent(name);
+    dl.setAttribute('download', name);
+    dl.classList.remove('disabled');
+    dl.removeAttribute('aria-disabled');
 
     const es = new EventSource('/events?log=' + encodeURIComponent(name));
     this.es = es;

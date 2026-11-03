@@ -213,3 +213,10 @@ main { flex: 1; display: flex; min-height: 0; }
 .stats-table th:not(:first-child) { text-align: right; }
 .stats-table tr.clickable { cursor: pointer; }
 .stats-table tr.clickable:hover { background: var(--bg2); }
+
+/* export (D9) */
+.dl-run { color: var(--accent); text-decoration: none; border: 1px solid var(--line); border-radius: 5px; padding: 2px 8px; white-space: nowrap; }
+.dl-run:hover { background: var(--bg3); }
+.dl-run.disabled { pointer-events: none; opacity: .4; }
+.export-btn { margin-left: auto; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--accent); padding: 0 8px; font-size: 14px; }
+.export-btn:hover { background: var(--bg3); }

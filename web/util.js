@@ -142,3 +142,13 @@ export function stringify(v) {
   if (typeof v === 'string') return v;
   try { return JSON.stringify(v, null, 2); } catch { return String(v); }
 }
+
+// Save text as a local file download (nothing leaves the machine).
+export function downloadText(filename, text, type = 'application/json') {
+  const url = URL.createObjectURL(new Blob([text], { type: type + ';charset=utf-8' }));
+  const a = el('a', { href: url, download: filename, style: 'display:none' });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}

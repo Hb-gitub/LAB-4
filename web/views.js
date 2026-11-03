@@ -1,6 +1,6 @@
 // Left pane (thread tree) and right pane (request detail), SPEC D5/D6.
 
-import { el, fmtMs, fmtUsd, fmtInt, oneLine, plural, wordCount, copyButton, fmtClock } from './util.js';
+import { el, fmtMs, fmtUsd, fmtInt, oneLine, plural, wordCount, copyButton, fmtClock, downloadText } from './util.js';
 import { costOf, stripHarness } from './model.js';
 import {
   section, badge, disclosure, longText, richText, jsonTree, textOrJson, wordDiff,
@@ -321,6 +321,10 @@ function detailHeader(app, ex) {
     const n = ex.parsed.messages.length;
     meta.push(`body = ${ex.parsed.system.length} system + ${ex.parsed.tools.length} tools + ${ex.newStart} history + ${n - ex.newStart} new messages + ${Object.keys(ex.parsed.params).length} params`);
   }
+  parts.push(el('button', {
+    class: 'export-btn', type: 'button', text: '⤓', title: 'Export this exchange as JSON',
+    onclick: (e) => { e.stopPropagation(); exportExchange(app, ex); },
+  }));
   const lines = [el('div', { class: 'd-line1' }, parts), el('div', { class: 'd-meta', text: meta.join('  ·  ') })];
   if (ex.end?.error) lines.push(el('div', { class: 'warn', text: 'upstream error: ' + ex.end.error }));
   const t = ex.thread;
@@ -501,3 +505,51 @@ function headerTable(h) {
   return tbl;
 }
 
+
+// ------------------------------------------------------- export (SPEC D9)
+
+// Neutral blocks keep a `raw` back-reference to the original JSON; the export's
+// `parsed` section is the neutral model only (the originals are in `raw`).
+function neutral(v) {
+  return JSON.parse(JSON.stringify(v, (k, x) => (k === 'raw' ? undefined : x)));
+}
+
+// The export document for one exchange, built from data the page already holds.
+export function exchangeExport(app, ex) {
+  const { store } = app;
+  let parsed = null;
+  if (ex.adapter) {
+    const p = ex.parsed;
+    const r = store.reply(ex);
+    const usage = store.usage(ex);
+    const usd = costOf(app.prices, store.model(ex), usage);
+    parsed = neutral({
+      kind: p.kind,
+      model: p.model,
+      system: p.system,
+      tools: p.tools,
+      messages: p.messages,
+      new_from: ex.newStart, // messages[0..new_from) are history, the rest is the new part (D5)
+      params: p.params,
+      reply: { blocks: r.blocks, stop_reason: r.stop_reason, error: r.error, counted_tokens: r.counted },
+      usage: usage || null,
+      cost_estimate: usd == null ? null : { label: 'API-equivalent estimate', usd },
+    });
+  }
+  return {
+    format: 'agent-traffic-exchange/1',
+    exported_at: new Date().toISOString(),
+    run: app.state.logName,
+    number: ex.seq,
+    exchange_id: ex.id,
+    thread: ex.thread ? app.labels.get(ex.thread).label : 'other / raw',
+    complete: !!ex.end,
+    raw: { request: ex.req, chunks: ex.chunks, end: ex.end },
+    parsed,
+  };
+}
+
+export function exportExchange(app, ex) {
+  const run = (app.state.logName || 'run').replace(/\.jsonl$/, '');
+  downloadText(`${run}_req-${ex.seq}.json`, JSON.stringify(exchangeExport(app, ex), null, 2) + '\n');
+}
